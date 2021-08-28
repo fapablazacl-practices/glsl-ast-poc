@@ -9,6 +9,8 @@
 
 #include "ResourceLimits.h"
 #include "ShaderLang.h"
+#include "glslang/MachineIndependent/localintermediate.h"
+#include "glslang/Include/intermediate.h"
 
 #include <cstdint>
 #include <experimental/filesystem>
@@ -77,6 +79,10 @@ json get_diagnostics(std::string uri, std::string content,
     EShMessages messages = EShMsgCascadingErrors;
     shader.parse(&Resources, 110, false, messages);
     std::string debug_log = shader.getInfoLog();
+
+    // ACA SE PUEDE IMPLEMENTAR LA AYUDA CONTEXTUAL!!
+    // shader.getIntermediate()->getTreeRoot()
+
     glslang::FinalizeProcess();
     *stdout = fp_old;
 
@@ -340,92 +346,137 @@ void ev_handler(struct mg_connection* c, int ev, void* p) {
     }
 }
 
-int main(int argc, char* argv[])
-{
-    CLI::App app{ "GLSL Language Server" };
+const std::string document = "shader.vert";
+const std::string content = R"(
+#version 450
+#extension GL_ARB_separate_shader_objects : enable
 
-    bool use_stdin = false;
-    bool verbose = false;
-    uint16_t port = 61313;
-    std::string logfile;
-    auto stdin_option = app.add_flag("--stdin", use_stdin, "Don't launch an HTTP server and instead accept input on stdin");
-    app.add_flag("-v,--verbose", verbose, "Enable verbose logging");
-    app.add_option("-l,--log", logfile, "Log file");
-    app.add_option("-p,--port", port, "Port", true)->excludes(stdin_option);
+layout(location = 0) out vec3 fragColor;
 
-    try {
-        app.parse(argc, argv);
-    } catch (const CLI::ParseError& e) {
-        return app.exit(e);
+vec2 positions[3] = vec2[](
+	vec2(0.0, -0.5),
+	vec2(0.0, 0.5),
+	vec2(-0.0, 0.5)
+);
+
+vec3 colors[3] = vec3[](
+	vec3(1.0, 0.0, 0.0), 
+	vec3(0.0, 1.0, 0.0), 
+	vec3(0.0, 0.0, 1.0)
+);
+
+void main() {
+    vec4 testVector = {0.0f, 0.0f, 1.0f, 1.0f};
+
+	gl_Position = vec4(positions[gl_VertexIndex], 0.0, 1.0) + testVector;
+	fragColor = colors[gl_VertexIndex];
+}
+)";
+
+
+class FindSymbolTraverser : public glslang::TIntermTraverser {
+public:
+    FindSymbolTraverser(const int line, const int column) {
+        this->line = line;
+        this->column = column;
     }
 
-    AppState appstate;
-    appstate.verbose = verbose;
-    appstate.use_logfile = !logfile.empty();
-    if (appstate.use_logfile) {
-        appstate.logfile_stream.open(logfile);
+    glslang::TIntermSymbol* getSymbol() const {
+        return symbol;
     }
 
-    if (!use_stdin) {
-        struct mg_mgr mgr;
-        struct mg_connection* nc;
-        struct mg_bind_opts bind_opts;
-        std::memset(&bind_opts, 0, sizeof(bind_opts));
-        bind_opts.user_data = &appstate;
+private:
+    int line, column;
+    glslang::TIntermSymbol* symbol = nullptr;
 
-        mg_mgr_init(&mgr, NULL);
-        fmt::print("Starting web server on port {}\n", port);
-        nc = mg_bind_opt(&mgr, std::to_string(port).c_str(), ev_handler, bind_opts);
-        if (nc == NULL) {
-            return 1;
-        }
+private:
+    void visitSymbol(glslang::TIntermSymbol* interm) override {
+        std::cout << "visitSymbol " << interm->getLoc().line << ":" << interm->getLoc().column << ", " << interm->getName() << std::endl;
 
-        // Set up HTTP server parameters
-        mg_set_protocol_http_websocket(nc);
+        const auto loc = interm->getLoc();
+        const auto name = interm->getName();
 
-        while (true) {
-            mg_mgr_poll(&mgr, 1000);
-        }
-        mg_mgr_free(&mgr);
-    } else {
-        char c;
-        MessageBuffer message_buffer;
-        while (std::cin.get(c)) {
-            message_buffer.handle_char(c);
+        if (line == loc.line) {
+            const auto start = loc.column;
+            const auto end = loc.column + name.size();
 
-            if (message_buffer.message_completed()) {
-                json body = message_buffer.body();
-                if (appstate.use_logfile) {
-                    fmt::print(appstate.logfile_stream, ">>> Received message of type '{}'\n", body["method"].get<std::string>());
-                    if (appstate.verbose) {
-                        fmt::print(appstate.logfile_stream, "Headers:\n");
-                        for (auto elem : message_buffer.headers()) {
-                            auto pretty_header = fmt::format("{}: {}\n", elem.first, elem.second);
-                            appstate.logfile_stream << pretty_header;
-                        }
-                        fmt::print(appstate.logfile_stream, "Body: \n{}\n\n", body.dump(4));
-                        fmt::print(appstate.logfile_stream, "Raw: \n{}\n\n", message_buffer.raw());
-                    }
-                }
-
-                auto message = handle_message(message_buffer, appstate);
-                if (message.has_value()) {
-                    fmt::print("{}", message.value());
-                    std::cout << std::flush;
-
-                    if (appstate.use_logfile && appstate.verbose) {
-                        fmt::print(appstate.logfile_stream, "<<< Sending message: \n{}\n\n", message.value());
-                    }
-                }
-                appstate.logfile_stream.flush();
-                message_buffer.clear();
+            if (column >= start && column <= end) {
+                symbol = interm;
             }
         }
     }
 
-    if (appstate.use_logfile) {
-        appstate.logfile_stream.close();
+    virtual void visitConstantUnion(glslang::TIntermConstantUnion* interm) {
+        std::cout << "visitConstantUnion " << interm->getLoc().line << ":" << interm->getLoc().column << std::endl;
     }
+
+    virtual bool visitBinary(glslang::TVisit visit, glslang::TIntermBinary* interm)       { 
+        std::cout << "visitBinary " << interm->getLoc().line << ":" << interm->getLoc().column << std::endl;
+        return true; 
+    }
+
+    virtual bool visitUnary(glslang::TVisit, glslang::TIntermUnary* interm)         { 
+        std::cout << "visitUnary " << interm->getLoc().line << ":" << interm->getLoc().column << std::endl;
+        return true; 
+    }
+
+    virtual bool visitSelection(glslang::TVisit, glslang::TIntermSelection* interm) { 
+        std::cout << "visitSelection " << interm->getLoc().line << ":" << interm->getLoc().column << std::endl;
+        return true; 
+    }
+
+    virtual bool visitAggregate(glslang::TVisit, glslang::TIntermAggregate* interm) { 
+        std::cout << "visitAggregate " << interm->getLoc().line << ":" << interm->getLoc().column << std::endl;
+        return true; 
+    }
+
+    virtual bool visitLoop(glslang::TVisit, glslang::TIntermLoop* interm)           { 
+        std::cout << "visitLoop " << interm->getLoc().line << ":" << interm->getLoc().column << std::endl;
+        return true; 
+    }
+
+    virtual bool visitBranch(glslang::TVisit, glslang::TIntermBranch* interm) { 
+        std::cout << "visitBranch " << interm->getLoc().line << ":" << interm->getLoc().column << std::endl;
+        return true; 
+    }
+
+    virtual bool visitSwitch(glslang::TVisit, glslang::TIntermSwitch* interm) {
+        std::cout << "visitSwitch " << interm->getLoc().line << ":" << interm->getLoc().column << std::endl;
+        return true; 
+    }
+};
+
+int main(int argc, char* argv[]) {
+    auto shader_cstring = content.c_str();
+    auto lang = find_language(document);
+    glslang::InitializeProcess();
+    glslang::TShader shader(lang);
+    shader.setStrings(&shader_cstring, 1);
+    TBuiltInResource Resources = glslang::DefaultTBuiltInResource;
+    EShMessages messages = EShMsgCascadingErrors;
+    shader.parse(&Resources, 110, false, messages);
+    std::string debug_log = shader.getInfoLog();
+
+    // ACA SE PUEDE IMPLEMENTAR LA AYUDA CONTEXTUAL!!
+    const auto intermediate = shader.getIntermediate();
+    const auto root = intermediate->getTreeRoot();
+
+    FindSymbolTraverser traverser{19, 13};
+
+    root->traverse(&traverser);
+
+    const auto symbol = traverser.getSymbol();
+
+    if (symbol) {
+        std::cout 
+            << symbol->getLoc().line << ":" << symbol->getLoc().column << " -> " 
+            << symbol->getName() << ":" << symbol->getWritableType().getBasicTypeString() 
+            << std::endl;
+    } else {
+        std::cout << "no symbol located!";
+    }
+
+    glslang::FinalizeProcess();
 
     return 0;
 }

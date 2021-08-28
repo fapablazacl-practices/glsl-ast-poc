@@ -1,3 +1,6 @@
+
+add_definitions(-D_SILENCE_EXPERIMENTAL_FILESYSTEM_DEPRECATION_WARNING)
+
 cmake_minimum_required(VERSION 3.0.0)
 project(glsl-language-server)
 
@@ -44,7 +47,7 @@ target_link_libraries(glslls
     glslang
     nlohmann_json
     mongoose
-    stdc++fs
+    #stdc++fs
     fmt::fmt-header-only
 )
 
